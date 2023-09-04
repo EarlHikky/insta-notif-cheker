@@ -2,6 +2,7 @@ import argparse
 import os
 import textwrap
 import time
+import logging
 from datetime import datetime
 
 import telegram
@@ -40,7 +41,6 @@ def check_new_notifications(cl: Client, last_check_timestamp: float) -> dict:
                         elif message_type == 'text':
                             notifications[thread.thread_title].append(message_content)
             cl.direct_send_seen(int(thread.id))
-
     return notifications
 
 
@@ -72,7 +72,7 @@ def main():
 
     bot = telegram.Bot(token=os.environ["TELEGRM_BOT_API_TOKEN"])
     telegram_chat_id = os.environ["CHAT_ID"]
-
+    bot.send_message(text='Start checking..', chat_id=telegram_chat_id)
     while True:
         current_timestamp = datetime.now().timestamp()
         last_check_timestamp = current_timestamp - check_interval
@@ -83,5 +83,7 @@ def main():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, filename="insta_checker_log.log", filemode="w",
+                        format="%(asctime)s %(levelname)s %(message)s")
     current_timezone = datetime.now().astimezone().tzinfo
     main()
