@@ -20,7 +20,7 @@ async def send_notifications(notifications: dict):
     for sender, notification in notifications.items():
         for content in notification:
             message = f'{sender}: {content}'
-            if 'Сергей' in sender:
+            if 'Сергей' in sender and content != 'Stories':
                 await bot.send_message(chat_id=telegram_chat_id,
                                        text=textwrap.dedent(message))
             else:
