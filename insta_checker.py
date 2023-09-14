@@ -3,12 +3,19 @@ import asyncio
 import logging
 import os
 import textwrap
+import time
 from datetime import datetime
+from pathlib import Path
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Dispatcher, types, Bot
 from dotenv import load_dotenv
 from instagrapi import Client
-from instagrapi.exceptions import LoginRequired
+from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes
+from requests.exceptions import RetryError
+
+
+class LoginUserException(Exception):
+    pass
 
 
 async def send_notifications(notifications: dict):
@@ -29,11 +36,16 @@ async def send_notifications(notifications: dict):
 
 
 async def manual_check(message: types.Message):
+    logger.info('Manual-check started')
     current_timestamp = datetime.now().timestamp() - check_interval
-    notifications = await check_new_notifications(current_timestamp)
-    if notifications:
-        return await send_notifications(notifications)
-    return await bot.send_message(chat_id=private_tg_id, text='No new..')
+    try:
+        notifications = await check_new_notifications(current_timestamp)
+    except TimeoutError:
+        return await bot.send_message(chat_id=private_tg_id, text='Login troubles')
+    else:
+        if notifications:
+            return await send_notifications(notifications)
+        return await bot.send_message(chat_id=private_tg_id, text='No new..')
 
 
 async def check_new_notifications(last_check_timestamp: float) -> dict:
@@ -46,6 +58,13 @@ async def check_new_notifications(last_check_timestamp: float) -> dict:
         list: A list of notifications.
     """
     notifications = {}
+
+    if not check_session():
+        while True:
+            logger.info('Re-login started')
+            if login_user():
+                break
+
     threads = cl.direct_threads(selected_filter='unread')
     if threads:
         for thread in threads:
@@ -67,22 +86,43 @@ async def check_new_notifications(last_check_timestamp: float) -> dict:
                         elif message_type == 'text':
                             notifications[thread.thread_title].append(message_content)
             cl.direct_send_seen(int(thread.id))
+
     return notifications
 
 
 async def start_checking():
     while True:
+        logger.info('Auto-check started')
         current_timestamp = datetime.now().timestamp()
         last_check_timestamp = current_timestamp - check_interval
-        notifications = await check_new_notifications(last_check_timestamp)
-        if notifications:
-            await send_notifications(notifications)
+        try:
+            notifications = await check_new_notifications(last_check_timestamp)
+        except TimeoutError:
+            await bot.send_message(chat_id=private_tg_id, text='Login troubles')
+        else:
+            if notifications:
+                await send_notifications(notifications)
         await asyncio.sleep(check_interval)
 
 
 async def start_bot():
+    dp = Dispatcher(bot)
     dp.register_message_handler(manual_check, commands=['manual_check'])
     await dp.start_polling()
+
+
+def check_session():
+    try:
+        cl.get_timeline_feed()
+    except LoginRequired:
+        logger.info('Session is invalid, need to login via username and password')
+    except PleaseWaitFewMinutes:
+        logger.info('sleeping')
+        time.sleep(300)
+    except Exception as e:
+        logger.info('Couldn\'t check session: %s' % e)
+    else:
+        return True
 
 
 def login_user():
@@ -90,9 +130,12 @@ def login_user():
     Attempts to login to Instagram using either the provided session information
     or the provided username and password.
     """
-
+    logger.info('start login user')
+    global cl
     cl = Client()
-    session = cl.load_settings("session.json")
+    cl.delay_range = [1, 3]
+
+    session = cl.load_settings(Path('session.json'))
 
     login_via_session = False
     login_via_pw = False
@@ -100,45 +143,46 @@ def login_user():
     if session:
         try:
             cl.set_settings(session)
-            cl.login(USERNAME, PASSWORD,
-                     verification_code=cl.totp_generate_code(os.environ['SEED']))
-
-            # check if session is valid
-            try:
-                cl.get_timeline_feed()
-            except LoginRequired:
-                logger.info("Session is invalid, need to login via username and password")
-
+            cl.login(username, password)
+            if not check_session():
                 old_session = cl.get_settings()
 
                 # use the same device uuids across logins
                 cl.set_settings({})
-                cl.set_uuids(old_session["uuids"])
+                cl.set_uuids(old_session['uuids'])
 
-                cl.login(USERNAME, PASSWORD,
-                         verification_code=cl.totp_generate_code(os.environ['SEED']))
-            login_via_session = True
+                cl.login(username, password,
+                         verification_code=cl.totp_generate_code(seed))
+
+            else:
+                login_via_session = True
+
+        except RetryError as e:
+            logger.info(e)
+            return False
         except Exception as e:
-            logger.info("Couldn't login user using session information: %s" % e)
+            logger.info('Couldn\'t login user using session information: %s' % e)
 
     if not login_via_session:
         try:
-            logger.info("Attempting to login via username and password. username: %s" % USERNAME)
-            if cl.login(USERNAME, PASSWORD,
-                        verification_code=cl.totp_generate_code(os.environ['SEED'])):
-                login_via_pw = True
+            logger.info('Attempting to login via username and password. username: %s' % username)
+            if cl.login(username, password,
+                        verification_code=cl.totp_generate_code(seed)):
+                if check_session():
+                    login_via_pw = True
+                    cl.dump_settings(Path('session.json'))
         except Exception as e:
-            logger.info("Couldn't login user using username and password: %s" % e)
+            logger.info('Couldn\'t login user using username and password: %s' % e)
 
     if not login_via_pw and not login_via_session:
-        raise Exception("Couldn't login user with either password or session")
+        raise LoginUserException('Couldn\'t login user with either password or session')
 
     return cl
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, filename="insta_checker_log.log", filemode="w",
-                        format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, filename='insta_checker_log.log', filemode='w',
+                        format='%(asctime)s %(levelname)s %(message)s')
     logger = logging.getLogger()
     parser = argparse.ArgumentParser(description='Start checking insta notifications.')
     parser.add_argument('-v', '--verif_code', type=int, help='Verification code')
@@ -149,58 +193,36 @@ if __name__ == '__main__':
     current_timezone = datetime.now().astimezone().tzinfo
 
     load_dotenv()
+    tg_bot_token = os.environ['TELEGRAM_BOT_API_TOKEN']
     private_tg_id = os.environ['PRIVATE_CHAT_ID']
     telegram_chat_id = os.environ['CHAT_ID']
-    USERNAME, PASSWORD = os.environ['INST_USER'], os.environ['INST_PASS']
-    # USERNAME, PASSWORD = os.environ['INST_USER_MEA'], os.environ['INST_PASS_MEA']
+    username, password = os.environ['INST_USER'], os.environ['INST_PASS']  # instagram user
+    seed = os.environ['SEED']  # 2FA seed
+
+    # username, password = os.environ['INST_USER_MEA'], os.environ['INST_PASS_MEA']
+    # cl.login(username, password)
+
     # cl = Client()
-    # cl.delay_range = [1, 3]
-    # cl.login(os.environ['INST_USER'], os.environ['INST_PASS'],
-    #          verification_code=cl.totp_generate_code(os.environ['SEED']))
-    # cl.dump_settings("session.json")
+    # cl.login(username, password,
+    #          verification_code=cl.totp_generate_code(seed))
+    #
+    # if check_session():
+    #     cl.dump_settings('session.json')
+
     cl = login_user()
-    cl.delay_range = [1, 3]
 
-    # try:
-    #     cl = Client()
-    #     cl.delay_range = [1, 3]
-    #     cl.load_settings('insta_checker_dump.json')
-    #     cl.login(os.environ['INST_USER'], os.environ['INST_PASS'], relogin=True,
-    #              verification_code=cl.totp_generate_code(
-    #                  os.environ['SEED']))  # this doesn't actually login using username/password but uses the session
-    #     cl.get_timeline_feed()  # check session
-    # except (LoginRequired, FileNotFoundError):
-    #     logging.warning('failure to login via login_settings.json')
-    #     cl = Client()
-    #     cl.delay_range = [1, 3]
-    #     # cl.login(os.environ['INST_USER_MEA'], os.environ['INST_PASS_MEA'])
-    #     cl.login(os.environ['INST_USER'], os.environ['INST_PASS'], relogin=True,
-    #              verification_code=cl.totp_generate_code(os.environ['SEED']))
-    #     cl.dump_settings('insta_checker_dump.json')
+    if cl:
+        cl.delay_range = [1, 3]
+        bot = Bot(tg_bot_token)
 
-    # cl.set_timezone_offset(3 * 3600)
+        loop = asyncio.get_event_loop()
+        loop.create_task(start_bot())
+        loop.create_task(start_checking())
 
-    bot = Bot(os.environ['TELEGRAM_BOT_API_TOKEN'])
-    dp = Dispatcher(bot)
-
-    loop = asyncio.get_event_loop()
-    insta_checker_task = loop.create_task(start_checking())
-    tg_bot_task = loop.create_task(start_bot())
-
-    try:
-        loop.run_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        loop.close()
-    # insta_checker_task.cancel()
-    # tg_bot_task.cancel()
-    # dp.stop_polling()
-    # dp.wait_closed()
-    # bot.close()
-    # loop.close()
-
-# cl.login(os.environ['INST_USER'], os.environ['INST_PASS'], verification_code='012027')
-# cl.login(os.environ['INST_USER_MEA'], os.environ['INST_PASS_MEA'])
-# cl.login_by_sessionid("61745534520%3ACVGL5mm4Ng4ctZ%3A16%3AAYf765cVrB3VRPiFGYbzbSzztW_ZyB0fi6S8ovGXZg") # Mea
-# cl.dump_settings('dump.json')
+        try:
+            logger.info('starting loop')
+            loop.run_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            loop.close()
