@@ -118,7 +118,7 @@ def check_session():
         logger.info('Session is invalid, need to login via username and password')
     except PleaseWaitFewMinutes:
         logger.info('sleeping')
-        time.sleep(300)
+        time.sleep(3)
     except Exception as e:
         logger.info('Couldn\'t check session: %s' % e)
     else:
@@ -131,9 +131,6 @@ def login_user():
     or the provided username and password.
     """
     logger.info('start login user')
-    global cl
-    cl = Client()
-    cl.delay_range = [1, 3]
 
     session = cl.load_settings(Path('session.json'))
 
@@ -151,8 +148,9 @@ def login_user():
                 cl.set_settings({})
                 cl.set_uuids(old_session['uuids'])
 
-                cl.login(username, password,
-                         verification_code=cl.totp_generate_code(seed))
+                cl.login(username, password)
+                # cl.login(username, password,
+                #          verification_code=cl.totp_generate_code(seed))
 
             else:
                 login_via_session = True
@@ -166,8 +164,9 @@ def login_user():
     if not login_via_session:
         try:
             logger.info('Attempting to login via username and password. username: %s' % username)
-            if cl.login(username, password,
-                        verification_code=cl.totp_generate_code(seed)):
+            if cl.login(username, password):
+                # if cl.login(username, password,
+                #             verification_code=cl.totp_generate_code(seed)):
                 if check_session():
                     login_via_pw = True
                     cl.dump_settings(Path('session.json'))
@@ -177,7 +176,7 @@ def login_user():
     if not login_via_pw and not login_via_session:
         raise LoginUserException('Couldn\'t login user with either password or session')
 
-    return cl
+    return True
 
 
 if __name__ == '__main__':
@@ -196,10 +195,10 @@ if __name__ == '__main__':
     tg_bot_token = os.environ['TELEGRAM_BOT_API_TOKEN']
     private_tg_id = os.environ['PRIVATE_CHAT_ID']
     telegram_chat_id = os.environ['CHAT_ID']
-    username, password = os.environ['INST_USER'], os.environ['INST_PASS']  # instagram user
+    # username, password = os.environ['INST_USER'], os.environ['INST_PASS']  # instagram user
     seed = os.environ['SEED']  # 2FA seed
 
-    # username, password = os.environ['INST_USER_MEA'], os.environ['INST_PASS_MEA']
+    username, password = os.environ['INST_USER_MEA'], os.environ['INST_PASS_MEA']
     # cl.login(username, password)
 
     # cl = Client()
@@ -208,10 +207,9 @@ if __name__ == '__main__':
     #
     # if check_session():
     #     cl.dump_settings('session.json')
-
-    cl = login_user()
-
-    if cl:
+    cl = Client()
+    cl.delay_range = [1, 3]
+    if login_user():
         cl.delay_range = [1, 3]
         bot = Bot(tg_bot_token)
 
