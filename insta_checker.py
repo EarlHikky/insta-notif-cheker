@@ -100,8 +100,11 @@ async def start_checking():
         except TimeoutError:
             await bot.send_message(chat_id=private_tg_id, text='Login troubles')
         else:
-            if notifications:
-                await send_notifications(notifications)
+            try:
+                if notifications:
+                    await send_notifications(notifications)
+            except Exception as e:
+                logger.error('Error occurred during send_notifications: %s' % e)
         await asyncio.sleep(check_interval)
 
 
